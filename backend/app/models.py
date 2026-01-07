@@ -70,6 +70,12 @@ class AskOut(BaseModel):
     unlocked_order: int = 0  # 0 表示只解锁大纲；1 表示解锁第一个知识点节点...
 
 
+class PlanGetOut(BaseModel):
+    session_id: str
+    plan: LearningPlan
+    unlocked_order: int
+
+
 class SubmitAnswerIn(BaseModel):
     user_id: str
     answer: str = Field(..., description="用户对该节点练习任务的回答（文字/代码都可）")
