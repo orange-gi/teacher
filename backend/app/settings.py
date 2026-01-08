@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     """
     后端配置：
     - LLM：OpenAI-compatible Chat Completions API（/v1/chat/completions）
-    - Supabase Postgres：用于知识图谱（替代 Neo4j）
+    - Supabase Postgres：用于知识图谱
     - SQLite：用于会话/历史/解锁状态
     """
 
@@ -29,11 +29,6 @@ class Settings(BaseSettings):
     supabase_url: str = ""
     supabase_anon_key: str = ""
     supabase_schema: str = "public"
-
-    # Neo4j（已不再作为默认图谱存储；保留字段以兼容旧配置）
-    neo4j_uri: str = "bolt://localhost:7687"
-    neo4j_user: str = "neo4j"
-    neo4j_password: str = "neo4j_password"
 
 
 settings = Settings()

@@ -135,7 +135,7 @@ async def ask(session_id: str, body: AskIn) -> AskOut:
     db.upsert_plan(session_id, outline, nodes)
     db.set_unlocked_order(session_id, 1 if nodes else 0)  # 生成后默认解锁第 1 个知识点
 
-    # 写入 Neo4j（可选）
+    # 写入图谱存储（Supabase，可选）
     if sb:
         try:
             sb.upsert_plan_concepts(user_id=body.user_id, nodes=nodes)

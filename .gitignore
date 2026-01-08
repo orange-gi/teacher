@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+.env
+backend/data/
+backend/*.db
+backend/**/*.db
+frontend/.env
+
+node_modules/
+.expo/
+dist/
