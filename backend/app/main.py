@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from . import db
 from .grader import grade_answer
-from .graph_store import Neo4jStore
+from .supabase_store import SupabaseStore
 from .langgraph_app import plan_graph
 from .llm import get_llm_public_config
 from .models import (
@@ -38,27 +38,24 @@ app.add_middleware(
 )
 
 
-neo4j: Neo4jStore | None = None
+sb: SupabaseStore | None = None
 
 
 @app.on_event("startup")
 def _startup() -> None:
     db.ensure_db()
-    global neo4j
+    global sb
     try:
-        neo4j = Neo4jStore()
-        neo4j.ensure_schema()
+        sb = SupabaseStore()
     except Exception:
-        # Neo4j 不可用也允许后端启动（Teacher 仍可用；图谱接口会报错）
-        neo4j = None
+        # Supabase 不可用也允许后端启动（Teacher 仍可用；图谱接口会报错）
+        sb = None
 
 
 @app.on_event("shutdown")
 def _shutdown() -> None:
-    global neo4j
-    if neo4j:
-        neo4j.close()
-        neo4j = None
+    # Supabase store 为 HTTP，无需关闭
+    pass
 
 
 @app.get("/health")
@@ -139,9 +136,9 @@ async def ask(session_id: str, body: AskIn) -> AskOut:
     db.set_unlocked_order(session_id, 1 if nodes else 0)  # 生成后默认解锁第 1 个知识点
 
     # 写入 Neo4j（可选）
-    if neo4j:
+    if sb:
         try:
-            neo4j.upsert_plan_concepts(user_id=body.user_id, session_id=session_id, nodes=nodes)
+            sb.upsert_plan_concepts(user_id=body.user_id, nodes=nodes)
         except Exception:
             pass
 
@@ -207,9 +204,9 @@ async def submit(session_id: str, node_id: str, body: SubmitAnswerIn) -> SubmitA
         db.set_unlocked_order(session_id, new_unlocked)
 
         # 图谱更新（可选）
-        if neo4j:
+        if sb:
             try:
-                neo4j.update_practice(body.user_id, str(node.get("title", "")), int(grade["score"]), bool(grade["passed"]))
+                sb.update_practice(body.user_id, str(node.get("title", "")), int(grade["score"]))
             except Exception:
                 pass
 
@@ -229,22 +226,22 @@ async def submit(session_id: str, node_id: str, body: SubmitAnswerIn) -> SubmitA
 
 @app.get("/graph", response_model=GraphOut)
 def get_graph(user_id: str) -> GraphOut:
-    if not neo4j:
-        raise HTTPException(status_code=503, detail="neo4j not available")
+    if not sb:
+        raise HTTPException(status_code=503, detail="supabase not available")
     try:
-        data = neo4j.get_graph(user_id)
+        data = sb.get_graph(user_id)
         return GraphOut(nodes=data["nodes"], edges=data["edges"])
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"neo4j error: {e}")
+        raise HTTPException(status_code=500, detail=f"supabase error: {e}")
 
 
 @app.post("/graph/upload")
 def upload_graph(body: GraphUploadIn) -> dict[str, str]:
-    if not neo4j:
-        raise HTTPException(status_code=503, detail="neo4j not available")
+    if not sb:
+        raise HTTPException(status_code=503, detail="supabase not available")
     try:
-        neo4j.upload_graph(body.user_id, body.nodes, body.edges)
+        sb.upload_graph(body.user_id, body.nodes, body.edges)
         return {"status": "ok"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"neo4j error: {e}")
+        raise HTTPException(status_code=500, detail=f"supabase error: {e}")
 
