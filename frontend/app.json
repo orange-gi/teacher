@@ -23,6 +23,7 @@
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false
     },
+    "platforms": ["ios", "android", "web"],
     "web": {
       "favicon": "./assets/favicon.png"
     }
