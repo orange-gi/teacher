@@ -1,7 +1,7 @@
-# LLM 学习教练（前后端分离：React Native + FastAPI + LangGraph + Neo4j）
+# LLM 学习教练（前后端分离：React Native + FastAPI + LangGraph + Supabase Postgres）
 
 ## 目录
-- `backend/`：FastAPI 后端（LangGraph 生成学习流程 + LLM 评分 + SQLite 持久化 + Neo4j 知识图谱）
+- `backend/`：FastAPI 后端（LangGraph 生成学习流程 + LLM 评分 + SQLite 持久化 + Supabase Postgres 知识图谱）
 - `frontend/`：Expo React Native 前端（Teacher 页解锁流程 + 星空风格知识图谱）
 
 ---
@@ -15,14 +15,12 @@
 python3 -m pip install --user -r backend/requirements.txt
 ```
 
-### 2) 启动 Neo4j（可选但推荐，用于知识图谱）
+### 2) 配置 Supabase（用于知识图谱）
 
-```bash
-cd backend
-docker compose up -d
-```
-
-Neo4j Web UI：`http://localhost:7474`（默认账号 `neo4j` / `neo4j_password`）
+1) 在 Supabase SQL Editor 执行：`supabase/schema.sql`
+2) 配置后端环境变量（见 `backend/.env.example`）：
+   - `APP_SUPABASE_URL`
+   - `APP_SUPABASE_ANON_KEY`
 
 ### 3) 启动 API
 

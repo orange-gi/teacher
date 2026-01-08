@@ -1,18 +1,21 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Modal,
+  PanResponder,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
-import Svg, { Circle, Line, Rect } from 'react-native-svg';
-import { forceCenter, forceCollide, forceLink, forceManyBody, forceSimulation } from 'd3-force';
+import Svg, { Circle, Defs, G, Line, RadialGradient, Rect, Stop, Text as SvgText } from 'react-native-svg';
+import { forceCenter, forceCollide, forceLink, forceManyBody, forceSimulation, forceX, forceY } from 'd3-force';
 import { apiGet, apiPost } from '../api/client';
 import type { GraphEdge, GraphNode, GraphOut } from '../api/types';
+import { supabase } from '../supabase/client';
 import { getOrCreateUserId } from '../utils/userId';
 
 type PositionedNode = GraphNode & { x: number; y: number };
@@ -48,6 +51,9 @@ function buildLayout(nodes: GraphNode[], edges: GraphEdge[], w: number, h: numbe
   const sim = forceSimulation(simNodes)
     .force('charge', forceManyBody().strength(-40))
     .force('center', forceCenter(w / 2, h / 2))
+    // 让层级更像“学习路径”：按 level 把 y 拉开
+    .force('y', forceY((d: any) => 60 + (Number(d.level || 0) * 70) % (h - 120)).strength(0.18))
+    .force('x', forceX(w / 2).strength(0.06))
     .force(
       'link',
       forceLink(simLinks)
@@ -69,6 +75,8 @@ export function GraphScreen() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [data, setData] = useState<GraphOut | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
 
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploadText, setUploadText] = useState(
@@ -89,8 +97,30 @@ export function GraphScreen() {
     )
   );
 
-  const W = 360; // 这里用固定画布；可后续改成测量容器尺寸
+  const { width } = useWindowDimensions();
+  const W = Math.max(340, Math.min(520, Math.floor(width - 24)));
   const H = 620;
+
+  // 交互：拖拽平移 + 按钮缩放（依赖最小；想要 pinch 缩放也可以继续加）
+  const [scale, setScale] = useState(1);
+  const [tx, setTx] = useState(0);
+  const [ty, setTy] = useState(0);
+  const panRef = useRef({ x: 0, y: 0 });
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onPanResponderGrant: () => {
+          panRef.current = { x: tx, y: ty };
+        },
+        onPanResponderMove: (_, g) => {
+          setTx(panRef.current.x + g.dx);
+          setTy(panRef.current.y + g.dy);
+        },
+        onPanResponderRelease: () => {},
+      }),
+    [tx, ty]
+  );
 
   useEffect(() => {
     getOrCreateUserId().then(setUserId);
@@ -105,8 +135,47 @@ export function GraphScreen() {
     setLoading(true);
     setErr(null);
     try {
-      const out = await apiGet<GraphOut>(`/graph?user_id=${encodeURIComponent(userId)}`);
-      setData(out);
+      // 优先：Supabase（Postgres）
+      const { data: concepts, error: e1 } = await supabase
+        .from('user_concepts')
+        .select('concept_id,name,level,last_seen_at,last_practice_at,mastery_score')
+        .eq('user_id', userId);
+      const { data: edges, error: e2 } = await supabase
+        .from('user_edges')
+        .select('source_id,target_id,type')
+        .eq('user_id', userId);
+
+      if (!e1 && !e2 && concepts) {
+        const now = Date.now();
+        const brightnessFrom = (iso?: string | null) => {
+          if (!iso) return 0.12;
+          const t = new Date(iso).getTime();
+          if (!Number.isFinite(t)) return 0.12;
+          const days = Math.max(0, (now - t) / 86400000);
+          const b = Math.exp(-days / 30);
+          return Math.max(0.08, Math.min(1, b));
+        };
+        const out: GraphOut = {
+          nodes: (concepts || []).map((r: any) => ({
+            id: r.concept_id,
+            name: r.name,
+            level: r.level,
+            last_practice_at: r.last_practice_at,
+            mastery_score: r.mastery_score,
+            brightness: brightnessFrom(r.last_practice_at || r.last_seen_at),
+          })),
+          edges: (edges || []).map((r: any) => ({
+            source: r.source_id,
+            target: r.target_id,
+            type: (r.type || 'PREREQ') as any,
+          })),
+        };
+        setData(out);
+      } else {
+        // 兜底：走后端（若你不想让前端直连 Supabase，可用这个）
+        const out = await apiGet<GraphOut>(`/graph?user_id=${encodeURIComponent(userId)}`);
+        setData(out);
+      }
     } catch (e: any) {
       setErr(e?.message || String(e));
       setData(null);
@@ -140,6 +209,24 @@ export function GraphScreen() {
     return m;
   }, [positioned]);
 
+  const adjacency = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    const add = (a: string, b: string) => {
+      if (!m.has(a)) m.set(a, new Set());
+      m.get(a)!.add(b);
+    };
+    for (const e of data?.edges || []) {
+      add(e.source, e.target);
+      add(e.target, e.source);
+    }
+    return m;
+  }, [data]);
+
+  const selectedNode = useMemo(() => {
+    if (!selectedId) return null;
+    return positioned.find((n) => n.id === selectedId) || null;
+  }, [selectedId, positioned]);
+
   return (
     <View style={styles.page}>
       <Modal visible={uploadOpen} animationType="slide">
@@ -168,6 +255,22 @@ export function GraphScreen() {
       <View style={styles.topbar}>
         <Text style={styles.title}>知识图谱</Text>
         <View style={{ flexDirection: 'row', gap: 10 }}>
+          <Pressable onPress={() => setScale((s) => Math.max(0.6, +(s - 0.15).toFixed(2)))} style={styles.ghostBtn}>
+            <Text style={styles.ghostText}>缩小</Text>
+          </Pressable>
+          <Pressable onPress={() => setScale((s) => Math.min(2.4, +(s + 0.15).toFixed(2)))} style={styles.ghostBtn}>
+            <Text style={styles.ghostText}>放大</Text>
+          </Pressable>
+          <Pressable
+            onPress={() => {
+              setScale(1);
+              setTx(0);
+              setTy(0);
+            }}
+            style={styles.ghostBtn}
+          >
+            <Text style={styles.ghostText}>重置</Text>
+          </Pressable>
           <Pressable onPress={refresh} style={styles.ghostBtn}>
             <Text style={styles.ghostText}>刷新</Text>
           </Pressable>
@@ -186,47 +289,144 @@ export function GraphScreen() {
         <View style={styles.card}>
           <Text style={styles.err}>{err}</Text>
           <Text style={styles.muted}>
-            如果提示 neo4j not available：先在 backend 目录启动 Neo4j（docker-compose），再刷新。
+            如果提示 supabase not available：请在后端配置 APP_SUPABASE_URL/APP_SUPABASE_ANON_KEY，并在 Supabase 执行 /supabase/schema.sql 后再刷新。
           </Text>
         </View>
       ) : data && data.nodes.length ? (
         <>
-          <View style={styles.canvasWrap}>
+          <Modal visible={detailOpen} animationType="slide" transparent>
+            <View style={styles.overlay}>
+              <View style={styles.detailCard}>
+                <View style={styles.detailTop}>
+                  <Text style={styles.detailTitle}>星星详情</Text>
+                  <Pressable onPress={() => setDetailOpen(false)} style={styles.ghostBtn}>
+                    <Text style={styles.ghostText}>关闭</Text>
+                  </Pressable>
+                </View>
+                {selectedNode ? (
+                  <>
+                    <Text style={styles.detailName}>{selectedNode.name}</Text>
+                    <Text style={styles.muted}>亮度：{selectedNode.brightness.toFixed(2)}</Text>
+                    {selectedNode.last_practice_at ? (
+                      <Text style={styles.muted}>最近练习：{new Date(selectedNode.last_practice_at).toLocaleString()}</Text>
+                    ) : (
+                      <Text style={styles.muted}>最近练习：暂无</Text>
+                    )}
+                    <Text style={styles.muted}>
+                      掌握度：{selectedNode.mastery_score !== null && selectedNode.mastery_score !== undefined ? selectedNode.mastery_score.toFixed(2) : '—'}
+                    </Text>
+
+                    <Text style={styles.sectionTitle}>相邻概念</Text>
+                    <ScrollView style={{ maxHeight: 220 }}>
+                      {[...(adjacency.get(selectedNode.id) || new Set())]
+                        .map((id) => nodeIndex.get(id))
+                        .filter(Boolean)
+                        .map((n) => (
+                          <Pressable
+                            key={n!.id}
+                            onPress={() => {
+                              setSelectedId(n!.id);
+                            }}
+                            style={styles.neiRow}
+                          >
+                            <View style={[styles.dot, { opacity: n!.brightness }]} />
+                            <Text style={styles.neiText} numberOfLines={1}>
+                              {n!.name}
+                            </Text>
+                          </Pressable>
+                        ))}
+                    </ScrollView>
+                  </>
+                ) : (
+                  <Text style={styles.muted}>未选中星星</Text>
+                )}
+              </View>
+            </View>
+          </Modal>
+
+          <View style={styles.canvasWrap} {...panResponder.panHandlers}>
             <Svg width={W} height={H}>
+              <Defs>
+                <RadialGradient id="neb1" cx="30%" cy="25%" rx="70%" ry="70%">
+                  <Stop offset="0%" stopColor="rgba(90,140,255,0.22)" />
+                  <Stop offset="55%" stopColor="rgba(30,60,120,0.10)" />
+                  <Stop offset="100%" stopColor="rgba(0,0,0,0)" />
+                </RadialGradient>
+                <RadialGradient id="neb2" cx="70%" cy="65%" rx="75%" ry="75%">
+                  <Stop offset="0%" stopColor="rgba(160,120,255,0.14)" />
+                  <Stop offset="50%" stopColor="rgba(60,40,120,0.08)" />
+                  <Stop offset="100%" stopColor="rgba(0,0,0,0)" />
+                </RadialGradient>
+              </Defs>
+
               <Rect x={0} y={0} width={W} height={H} fill="#04060c" />
+              <Rect x={0} y={0} width={W} height={H} fill="url(#neb1)" />
+              <Rect x={0} y={0} width={W} height={H} fill="url(#neb2)" />
 
-              {/* 边：更暗更细，作为“星座连线” */}
-              {data.edges.map((e, i) => {
-                const a = nodeIndex.get(e.source);
-                const b = nodeIndex.get(e.target);
-                if (!a || !b) return null;
-                return (
-                  <Line
-                    key={i}
-                    x1={a.x}
-                    y1={a.y}
-                    x2={b.x}
-                    y2={b.y}
-                    stroke={e.type === 'PREREQ' ? 'rgba(120,170,255,0.18)' : 'rgba(120,170,255,0.10)'}
-                    strokeWidth={e.type === 'PREREQ' ? 1.2 : 0.8}
-                  />
-                );
+              {Array.from({ length: 110 }).map((_, i) => {
+                const x = 6 + hash01(`bg:${i}:x`) * (W - 12);
+                const y = 6 + hash01(`bg:${i}:y`) * (H - 12);
+                const op = 0.04 + hash01(`bg:${i}:o`) * 0.18;
+                const r = 0.6 + hash01(`bg:${i}:r`) * 1.4;
+                return <Circle key={`bg-${i}`} cx={x} cy={y} r={r} fill={`rgba(255,255,255,${op})`} />;
               })}
 
-              {/* 星星：brightness -> opacity；mastery_score -> 半径 */}
-              {positioned.map((n) => {
-                const r = 2.2 + (n.mastery_score ? Math.min(1, n.mastery_score) * 3.8 : 0);
-                const op = Math.max(0.08, Math.min(1, n.brightness));
-                return (
-                  <Circle
-                    key={n.id}
-                    cx={n.x}
-                    cy={n.y}
-                    r={r}
-                    fill={`rgba(255,255,255,${op})`}
-                  />
-                );
-              })}
+              <G transform={`translate(${tx} ${ty}) scale(${scale})`}>
+                {data.edges.map((e, i) => {
+                  const a = nodeIndex.get(e.source);
+                  const b = nodeIndex.get(e.target);
+                  if (!a || !b) return null;
+                  const isHot =
+                    selectedId &&
+                    (e.source === selectedId ||
+                      e.target === selectedId ||
+                      adjacency.get(selectedId)?.has(e.source) ||
+                      adjacency.get(selectedId)?.has(e.target));
+                  const base = e.type === 'PREREQ' ? 0.18 : 0.1;
+                  const op = isHot ? 0.45 : base;
+                  return (
+                    <Line
+                      key={i}
+                      x1={a.x}
+                      y1={a.y}
+                      x2={b.x}
+                      y2={b.y}
+                      stroke={`rgba(120,170,255,${op})`}
+                      strokeWidth={isHot ? 1.8 : e.type === 'PREREQ' ? 1.2 : 0.8}
+                    />
+                  );
+                })}
+
+                {positioned.map((n) => {
+                  const isSel = n.id === selectedId;
+                  const isNear = selectedId ? adjacency.get(selectedId)?.has(n.id) : false;
+                  const rCore = 2.2 + (n.mastery_score ? Math.min(1, n.mastery_score) * 3.8 : 0);
+                  const op = Math.max(0.08, Math.min(1, n.brightness));
+                  const glow = isSel ? 0.55 : isNear ? 0.28 : 0.18;
+                  const glowR = rCore + (isSel ? 10 : isNear ? 6 : 4);
+                  return (
+                    <G key={n.id}>
+                      <Circle cx={n.x} cy={n.y} r={glowR} fill={`rgba(110,170,255,${glow * op * 0.22})`} />
+                      <Circle cx={n.x} cy={n.y} r={rCore + 2.2} fill={`rgba(255,255,255,${op * 0.25})`} />
+                      <Circle
+                        cx={n.x}
+                        cy={n.y}
+                        r={rCore}
+                        fill={`rgba(255,255,255,${isSel ? 1 : op})`}
+                        onPress={() => {
+                          setSelectedId(n.id);
+                          setDetailOpen(true);
+                        }}
+                      />
+                      {isSel || isNear ? (
+                        <SvgText x={n.x + 8} y={n.y - 8} fill="rgba(210,230,255,0.85)" fontSize="11">
+                          {n.name.length > 12 ? `${n.name.slice(0, 12)}…` : n.name}
+                        </SvgText>
+                      ) : null}
+                    </G>
+                  );
+                })}
+              </G>
             </Svg>
           </View>
 
@@ -291,5 +491,13 @@ const styles = StyleSheet.create({
     color: '#e8eefc',
     fontFamily: 'monospace',
   },
+  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'flex-end', padding: 12 },
+  detailCard: { backgroundColor: '#0b0f17', borderWidth: 1, borderColor: '#1b2a4a', borderRadius: 16, padding: 12 },
+  detailTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  detailTitle: { color: '#e8eefc', fontWeight: '900', fontSize: 16 },
+  detailName: { color: '#d7e6ff', fontWeight: '900', fontSize: 18, marginTop: 8 },
+  sectionTitle: { color: '#9bb0dc', marginTop: 12, marginBottom: 6, fontWeight: '800' },
+  neiRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#101a33' },
+  neiText: { color: '#cfe0ff', fontWeight: '800', flex: 1 },
 });
 
